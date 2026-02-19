@@ -3,9 +3,10 @@ import base64
 import json
 import math
 import os
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Dict, List
+from typing import Dict, List, Optional
 from sentence_transformers import SentenceTransformer
 from pymongo import MongoClient, ASCENDING, DESCENDING
 
@@ -16,8 +17,25 @@ MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
 MONGODB_DB = os.getenv("MONGODB_DB", "solace")
 MONGODB_COLLECTION = os.getenv("MONGODB_COLLECTION", "memories")
 
-MODEL = SentenceTransformer(EMBED_MODEL_NAME)
-DIM = MODEL.get_sentence_embedding_dimension()
+_MODEL: Optional[SentenceTransformer] = None
+_DIM: Optional[int] = None
+_MODEL_LOCK = threading.Lock()
+
+
+def get_model() -> SentenceTransformer:
+    global _MODEL, _DIM
+    if _MODEL is None:
+        with _MODEL_LOCK:
+            if _MODEL is None:
+                _MODEL = SentenceTransformer(EMBED_MODEL_NAME)
+                _DIM = _MODEL.get_sentence_embedding_dimension()
+    return _MODEL
+
+
+def get_dim() -> int:
+    if _DIM is None:
+        _ = get_model()
+    return int(_DIM or 0)
 
 
 def now_ms() -> int:
@@ -34,8 +52,9 @@ def decode_text(payload: str) -> str:
 
 def embed_text(text: str) -> List[float]:
     if not text.strip():
-        return [0.0] * DIM
-    vec = MODEL.encode([text], normalize_embeddings=True)[0]
+        return [0.0] * get_dim()
+    model = get_model()
+    vec = model.encode([text], normalize_embeddings=True)[0]
     return [float(x) for x in vec]
 
 
@@ -129,7 +148,16 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/health":
-            self._send(200, {"ok": True, "service": "memory-embed", "dim": DIM, "model": EMBED_MODEL_NAME})
+            self._send(
+                200,
+                {
+                    "ok": True,
+                    "service": "memory-embed",
+                    "dim": _DIM if _DIM is not None else None,
+                    "model": EMBED_MODEL_NAME,
+                    "modelLoaded": _MODEL is not None,
+                },
+            )
             return
         self._send(404, {"error": "Not found"})
 
